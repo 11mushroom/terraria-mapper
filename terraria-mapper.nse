@@ -136,7 +136,7 @@ packs = {
         return pack:deserializer(payload)
       end
     end
-    return nil      
+    return {ID=nil}      
   end,
   serialize = function(self, ID, packdata)
     for _, pack in ipairs(self) do
@@ -234,7 +234,7 @@ action = function(host, port)
   if (parsed_pack.ID==ASNSLOT) or
     (pack.ID==LDNETMD) or
     (pack.ID==REQPSWD and #pack.payload==1) or
-    (parsed_pack~=nil and parsed_pack.ID==DISCONN and
+    (parsed_pack.ID==DISCONN and
     parsed_pack.reason.message~=nil)
     then -- it probably is a duck
 
