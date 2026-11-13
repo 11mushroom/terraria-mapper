@@ -25,6 +25,14 @@ side effects of bruteforcing:
   - sometimes can disrupt work of a target server
     and in some cases even crash it.
 
+can try picking the version using table of known versions
+if argument "pick_v" is passed.
+  - less aggressive than brutefoce
+  - can be faster than brute force
+  - can be a little bit less noticable than brutefoce
+  - sometimes can disrupt work of a target server
+    and in some cases even crash it.
+
 ]]
 
 ---
@@ -48,9 +56,18 @@ side effects of bruteforcing:
 --
 --   also very noticable from target's console.
 --
--- bf_range={from, to}
+-- bf_v={from, to}
 --   [from, to] inclusive range of protocol versions to try
 --   if it's not set, the default [400, 200] range is used
+--
+-- pick_v
+--   uses table of known versions to try to pick the version
+--   can be faster and a little bit less noticable,
+--   and can be less aggressive than bruteforce
+--
+-- pick_v=path/to/file
+--   loads custom table of known versions for picking
+--   from a given path to file
 
 author = "11mushroom"
 license = "MPL-2.0--See https://mozilla.org/MPL/2.0/"
@@ -65,12 +82,51 @@ categories = {"version", "intrusive", "dos"}
 --   https://seancode.com/terrafirma/net.html
 -- 
 
+-----------------------------------------
+
+local vtable = { -- table of known versions
+  {326, "1458"},
+  {325, "1457"},
+  {319, "1456"},
+  {318, "1455"},
+  {317, "1454"},
+  {316, "1453"},
+  {315, "1450 1451 1452"},
+  {279, "1449"},
+  {278, "14481"},
+  {277, "1448"},
+  {276, "1447"},
+  {275, "1446"},
+  {274, "1445"},
+  {273, "1444"},
+  {272, "1443"},
+  {271, "1442"},
+  {270, "1441"}, -- it's a guess, need a proof for 1441
+  {269, "144"},
+  {248, "1436"},
+  {247, "1435"},
+  {246, "1434"},
+  {245, "1433"},
+  {244, "1432"},
+  {243, "1431"},
+  {242, "143"},
+  {238, "1423"},
+}
+
+local find_release=function(where,version)
+  for _,p in ipairs(where) do
+    if p[1]==version then
+      return p[2]
+    end
+  end
+  return nil
+end
+
 -----------parsing functions-------------
 
 local packs
-
 packs = {
-  {
+  [0x01] = {
     ID = 0x01, -- connect (client)
     deserializer=function(self, payload)
       return {ID=nil}
@@ -80,7 +136,7 @@ packs = {
       return string.char(self.ID, mlen)..packdata.message:sub(1, mlen)
     end
   },
-  {
+  [0x02] = {
     ID = 0x02, -- disconnect (server)
     deserializer=function(self, payload)
       local len = #payload
@@ -101,7 +157,7 @@ packs = {
       return nil
     end,
   },
-  {
+  [0x03] = {
     ID = 0x03, -- assign slot (server)
     deserializer=function(self, payload)
       local result = {ID=nil, slot=nil}
@@ -116,7 +172,7 @@ packs = {
       return nil
     end
   },
-  {
+  [0x26] = {
     ID = 0x26, -- send password (client)
     deserializer=function(self, payload)
       return {ID = nil}
@@ -131,18 +187,14 @@ packs = {
     end,
   },
   deserialize = function(self, ID, payload)
-    for _, pack in ipairs(self) do
-      if pack.ID == ID then
-        return pack:deserializer(payload)
-      end
+    if type(self[ID]) == 'table' then
+      return self[ID]:deserializer(payload)
     end
-    return {ID=nil}      
+    return {ID=nil}
   end,
   serialize = function(self, ID, packdata)
-    for _, pack in ipairs(self) do
-      if pack.ID == ID then
-        return pack:serializer(packdata)
-      end
+    if type(self[ID]) == 'table' then
+      return self[ID]:serializer(packdata)
     end
     return nil
   end,
@@ -200,19 +252,25 @@ action = function(host, port)
   local terraria = false
 
   -- bruteforce version or not
-  local bf_version = stdnse.get_script_args('bf_v') and true or false
+  local bf_version = stdnse.get_script_args('bf_v') or false
   -- bruteforce range
   local from, to = 400, 200
-  local v_range = stdnse.get_script_args('bf_range')
-  if type(v_range)=='table' and #v_range==2 and
-     tonumber(v_range[1])~=nil and tonumber(v_range[2])~=nil then
+  if type(bf_version)=='table' and
+     tonumber(bf_version[1])~=nil and tonumber(bf_version[2])~=nil then
 
-     from, to = math.abs(math.floor(tonumber(v_range[1]))),
-                math.abs(math.floor(tonumber(v_range[2])))
+     from, to = math.abs(math.floor(tonumber(bf_version[1]))),
+                math.abs(math.floor(tonumber(bf_version[2])))
   end
+  bf_version = bf_version and true
 
+  local pick_v = stdnse.get_script_args('pick_v') or false
+  if type(pick_v) == 'string' then
+    vtable=dofile(pick_v)
+  end
+  pick_v = pick_v and true
 
   local catch = function()
+    stdnse.debug(1, "connection error")
     sock:close()
   end
   local try = nmap.new_try(catch)
@@ -268,7 +326,7 @@ action = function(host, port)
         end
       end
 
-      stdnse.sleep(0.1)
+      -- stdnse.sleep(0.1)
 
       try(sock:close())
 
@@ -281,12 +339,56 @@ action = function(host, port)
         end
 
         nmap.set_port_version(host, port)
-        return {version=vers}
+        return {version=vers, release=find_release(vtable, vers) or 'unknown'}
 
       -- in case packet 0x52 still goes through
       elseif pack.ID==LDNETMD then
         nmap.log_write("stdout", "Packet 0x52 disrupted probe!!!")
-        return {version=0}
+        return {version=0, release='unknown'}
+      end
+
+    end
+  elseif pick_v then
+    for _,vp in ipairs(vtable) do
+      local vers, release = vp[1], vp[2]
+      v=vers
+
+      sock = nmap.new_socket()
+
+      try(sock:connect(host.ip, port.number))
+
+      try(sock:send(
+        to_pack(packs:serialize(CONNECT,{message = "Terraria"..vers}))
+      ))
+
+      -- in case server spams with 0x52 packets first
+      for i = 1, 11 do
+        pack = read_pack(sock, try)
+        if pack.ID~=LDNETMD then
+          stdnse.debug(1, "pack.ID: 0x%02x,vers: %03d", pack.ID, vers)
+          break
+        end
+      end
+
+      -- stdnse.sleep(0.1)
+
+      try(sock:close())
+
+      if pack.ID == ASNSLOT or pack.ID==REQPSWD then
+        port.version.version = vers
+
+        -- if requires password
+        if pack.ID == REQPSWD then
+          port.version.name = port.version.name.."_password"
+        end
+
+        nmap.set_port_version(host, port)
+        return {version=vers, release=release}
+
+      -- in case packet 0x52 still goes through
+      elseif pack.ID==LDNETMD then
+        nmap.log_write("stdout", "Packet 0x52 disrupted probe!!!")
+        return {version=0, release='unknown'}
       end
 
     end
