@@ -213,9 +213,10 @@ local read_pack = function(socket, try)
   local len = 0
   -- nmap.log_write("stdout", #buf)
   -- nmap.log_write("stdout", buf:gsub("[^ -~]", function(c) return ("\\x%02x"):format(c:byte()) end))
-  if buf ~= nil and #buf==2 then
+  if #buf==2 then
     len = string.unpack("<I2", buf)
   end
+
   -- nmap.log_write("stdout", len)
   buf = ""
   if len >= 3 then
@@ -225,7 +226,39 @@ local read_pack = function(socket, try)
   return {len = len, ID = buf:byte(1), payload = buf}
 end
 
+local try_read_first = function(socket, try)
+  local limits = {
+    [0x02] = {5, 260},    -- disconnect 
+    [0x03] = {5, 5},      -- assign slot
+    [0x25] = {3, 3},      -- request password
+    [0x52] = {4, 0xffff}, -- load net module
+  }
 
+  local buf = try(socket:receive_buf(match.numbytes(2), true))
+  local raw_pack={len = nil, ID = nil, payload = nil}
+  if #buf~=2 then
+    return nil end
+
+  raw_pack.len = string.unpack("<I2", buf)
+  if raw_pack.len < 3 then
+    return nil end
+
+  buf = buf..try(socket:receive_buf(match.numbytes(1), true))
+  raw_pack.ID = buf:byte(3)
+
+  if limits[raw_pack.ID]==nil or
+    raw_pack.len<limits[raw_pack.ID][1] or
+    raw_pack.len>limits[raw_pack.ID][2]
+    then
+
+    return nil
+  end
+
+  buf = buf..try(socket:receive_buf(match.numbytes(raw_pack.len-3), true))
+  raw_pack.payload = buf:sub(3,-1)
+
+  return raw_pack
+end
 
 -----------magic numbers-----------------
 
@@ -278,20 +311,26 @@ action = function(host, port)
   local pack
   local v
 
+  sock:set_timeout(10000)
   try(sock:connect(host.ip, port.number))
 
   try(sock:send(
     to_pack(packs:serialize(CONNECT, {message = "Terraria"..100}))
   ))
 
-  pack = read_pack(sock, try)
+  -- don't waste time on a wrong data
+  pack = try_read_first(sock, try)
+  
+  if pack==nil then
+    stdnse.debug(2, "invalid first packed")
+    try(sock:close())
+    return
+  end
 
   local parsed_pack = packs:deserialize(pack.ID, pack.payload)
 
   -- if it looks like a duck, and quacks like a duck,
-  if (parsed_pack.ID==ASNSLOT) or
-    (pack.ID==LDNETMD) or
-    (pack.ID==REQPSWD and #pack.payload==1) or
+  if (pack.ID~=DISCONN) or
     (parsed_pack.ID==DISCONN and
     parsed_pack.reason.message~=nil)
     then -- it probably is a duck
